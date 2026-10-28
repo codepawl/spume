@@ -1,0 +1,15 @@
+schema_version = "1.0.0"
+id = "spume"
+version = "0.2.0"
+name = "Spume"
+tagline = "GPU liquid simulation with whitewater, baked by the Spume solver"
+maintainer = "CodePawl <legal@codepawl.com>"
+type = "add-on"
+website = "https://github.com/codepawl/spume"
+blender_version_min = "4.2.0"
+license = ["SPDX:Apache-2.0"]
+copyright = ["2026 CodePawl"]
+tags = ["Physics", "Animation"]
+
+[permissions]
+files = "Read and write the bake cache, run the solver process"
