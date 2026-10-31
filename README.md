@@ -62,20 +62,24 @@ Units are metres, seconds, +Y up, the floor at y = 0 and the domain's low corner
 | Output | `--out` folder, `--name`, `--fps`, `--frames`, `--skip-seconds` (simulate without writing, to start on a steady flow), `--preview out.png` (point-cloud picture at three moments), `--seed` |
 | Domain | `--cell` simulation cell, `--width` (z), `--length` (x, default = width), `--height`, `--closed` (solid walls on all six faces, ceiling included) |
 | Inflow | `--inflow floor\|side`, `--inflow-position X Z` (floor) or `X Y Z` (side), `--inflow-height`, `--direction X Y Z`, `--shape circle\|rectangle`, `--opening` (diameter), `--opening-size WIDE HIGH`, `--speed`, `--rise`, `--feed`, `--taper`, `--cone`, `--turbulence` |
-| Many inflows | `--inflows file.json`: a list of `{mode, position, direction, shape, size, speed, rise, feed, taper}`. Missing keys take the command line values. `size` is a diameter, or `[wide, high]` for a rectangle. |
+| Many inflows | `--inflows file.json`: a list of `{mode, position, direction, shape, size, speed, rise, feed, taper, delay}`. Missing keys take the command line values. `size` is a diameter, or `[wide, high]` for a rectangle. `delay` is the seconds before the pulse starts. |
 | Obstacles | `--obstacle-mask file.npy` (bool array `(nx, ny, nz)` of solid cells on the solver grid, `nx = round(length / cell)`), `--obstacle-box X0 Y0 Z0 X1 Y1 Z1` (repeatable; every cell the box overlaps is solid) |
 | Outflow | `--outflow-box X0 Y0 Z0 X1 Y1 Z1` (repeatable): liquid and whitewater inside are deleted |
-| Pressure | `--pressure sor\|cg`, `--iterations`, `--omega` (SOR only) |
-| Liquid | `--particles-per-cell`, `--flip` (FLIP share of the PIC/FLIP blend), `--cfl`, `--max-particles` |
+| Pressure | `--pressure cg\|sor`, `--iterations`, `--omega` (SOR only) |
+| Viscosity | `--viscosity` (m^2/s), `--viscosity-iterations` |
+| Floor | `--floor-friction` (per second): slows liquid in the cell row on the floor. A slip floor makes a fast sheet thinner than a cell. Try 5 to 15 |
+| Liquid | `--liquid-box X0 Y0 Z0 X1 Y1 Z1` (repeatable; liquid at rest in the box at frame 0, solid cells skipped), `--particles-per-cell`, `--flip` (FLIP share of the PIC/FLIP blend), `--cfl`, `--max-particles` |
 | Surface | `--mesh-cell`, `--mesh-radius`, `--iso` |
 | Whitewater | `--no-whitewater`, `--ww-capacity`, `--ww-trapped-rate`, `--ww-crest-rate`, `--ww-life MIN MAX`, `--ww-export` (points kept per frame), `--ww-buoyancy`, `--ww-drag` |
 
 How the pieces behave:
 
 - **Inflow.** A floor inflow is a vertical jet out of the floor at `--inflow-position` (default the middle). A side inflow is an opening at any point;
-  when its centre lies on a domain face, that face is solid around it (a pipe wall). Every inflow has its own pulse: smooth rise, a held feed, a smooth taper.
+  when its centre lies on a domain face, that face is solid around it (a pipe wall). Every inflow has its own pulse: an optional delay, a smooth rise, a held feed, a smooth taper. An inflow at zero speed does not touch the flow.
 - **Obstacles.** Solid cells carry no flow through their faces and no pressure; liquid and whitewater particles slide along them. Surface vertices the
   particle splats leave inside a solid are moved back out, so the mesh does not enter the obstacle.
+- **Jet breakup.** `--turbulence` puts slow waves across the opening, in the speed and the direction of the water. They change at a Strouhal number of about 0.3 (speed over diameter). The solver has no surface tension or air, so with `--turbulence 0` a jet stays a smooth rod until it hits something.
+- **Surface.** Each particle's kernel takes its shape from its neighbours (after Yu and Turk 2013), so it flattens on a sheet and stretches along a rope, and its centre moves towards their mean. A small blur on the density field joins the rest, and droplets with few neighbours go in after the blur so they stay. The mesher mirrors particles near the floor, so a thin sheet keeps the half of its kernel that the floor cuts off. Triangles wind outward, so a renderer with backface culling still shows open sheets.
 - **Walls.** The floor is always solid. `--closed` makes all six faces solid. Every other face is open air (pressure 0), and particles that leave through it are removed.
   Whitewater bounces off solid side walls and the ceiling.
 - **Progress.** The solver prints `frame i/n` after every frame, so a host can show a progress bar.
@@ -84,9 +88,7 @@ How the pieces behave:
 
 ## Pressure solver
 
-`--pressure sor` is the red-black SOR sweep (default, as in 0.1). `--pressure cg` is a matrix-free conjugate gradient with a Jacobi
-preconditioner, all on the GPU (`pressure.py`): the step lengths stay on the device, so an iteration never waits for the host.
-Both start from the previous step's pressure. `--iterations` counts SOR sweeps (two half-sweeps each) or CG iterations.
+`--pressure cg` (default) is a matrix-free conjugate gradient with a Jacobi preconditioner, all on the GPU (`pressure.py`). The step lengths stay on the device, so an iteration never waits for the host. `--pressure sor` is the red-black SOR sweep. Use `--iterations 60` with it to get an asset from 0.1 or 0.2 again. Both start from the previous step's pressure. `--iterations` counts CG iterations or SOR sweeps (two half-sweeps each).
 
 Measured on the street-geyser settings (RTX 3060, 180 frames, 213 thousand liquid particles, grid 113 x 250 x 113 at 8 cm). Residual is the worst
 divergence left in a liquid cell after projection, in 1/s, averaged over the frames and its worst frame; `sim` is the solver time without whitewater and mesh:
@@ -98,10 +100,37 @@ divergence left in a liquid cell after projection, in 1/s, averaged over the fra
 | CG | 40 | 51.3 s | 0.027 | 4.19 |
 | CG | 60 | 61.7 s | 0.0005 | 0.07 |
 
-CG with 20 iterations is faster and about six times tighter than SOR with 60. The 40 and 60 rows were timed while another program was
-using the GPU, so read their times as upper bounds. Use `--pressure cg --iterations 20` for new bakes; `sor` stays the default so that existing commands
-that pass `--iterations 60` keep giving the same asset. The 4.19 spike at 40 iterations is a single frame at a one-cell splash where the
-Jacobi preconditioner has not converged yet; a multigrid preconditioner would fix that and is the next step.
+CG with 20 iterations is faster and about six times tighter than SOR with 60. The 40 and 60 rows were timed while another program was using the GPU, so read their times as upper bounds.
+
+A spike in the worst residual comes from a lone particle in a cell with a face that holds almost no weight. The particle does not read that face, so the spike does not move the liquid.
+
+## Viscosity
+
+`--viscosity` adds an implicit solve on the liquid faces after gravity and before pressure, by Jacobi sweeps (`diffuse_face` in `flip.py`). Solids and solid walls are no-slip. A free surface has no shear. Use a low `--flip` with it, such as 0.3, because FLIP noise breaks up a thick rope. The value is a kinematic viscosity: about 0.01 m^2/s for honey and 0.1 for thick cream, as a starting point. Few sweeps under-solve a high value, so the liquid is thinner than the number says.
+
+## How thin or thick the liquid looks
+
+These options set the look, from thin to thick:
+
+| Option | Thinner | Thicker |
+| --- | --- | --- |
+| `--floor-friction` | 0 to 2: the liquid runs out in a sheet that tears | 8 or more: the liquid stays deep on the floor |
+| `--separation` | 1.5: an impact throws water up | 0: an impact loses most of its energy, and the water stays low |
+| `--turbulence` | 0.15 to 0.3 on a big jet: the jet tears and spreads | 0: the jet stays a smooth rod |
+| `--flip` | 0.97 to 0.99: more splash, more loose droplets | 0.3 to 0.9: slow, smooth motion |
+| `--iso` | 0.35 to 0.5: a thin surface | 0.2: a fat surface |
+| `--viscosity` | 0 | 0.01 for honey, 0.1 for thick cream |
+
+On a thin faucet stream, keep `--turbulence` low, about 0.06. A high value twists the stream. `--separation` also adds to the residual divergence in `report.json`, because it asks for divergence on purpose in crowded cells.
+
+## How it stays fast
+
+- `launcher.py` records each kernel launch and resends only the scalars that changed. A plain `wp.launch` costs about 130 microseconds on an RTX 3060 and a recorded one about 20, and a step makes more than 100 launches.
+- `sparse.py` runs the grid kernels only over blocks of 8 x 8 x 8 cells that hold liquid or touch a block that does. The pressure solve runs on a list of the liquid cells. Fields stay dense, so sampling still works anywhere.
+- A step extrapolates velocity once, for whitewater. Liquid particles only read faces they splatted to.
+- The step size comes from the fastest inflow or a free fall from the top of the domain, so a small scene takes no extra steps.
+
+Measured on an RTX 3060 that another job was also using: 150 frames at a 0.05 m cell with about 500k particles and a 0.025 m mesh, no whitewater, took 130 s (simulation 31 s, mesh 83 s).
 
 ## Output
 
@@ -121,13 +150,14 @@ add `origin` back to get domain coordinates. With `--no-whitewater` the spray fi
 
 - `flip.py` particles to grid, gravity, inflow openings, solid walls and obstacles, SOR pressure, grid to particles (PIC/FLIP blend), outflow boxes.
 - `pressure.py` the conjugate-gradient pressure solve.
+- `sparse.py` the active blocks and liquid cells. `launcher.py` recorded kernel launches.
 - `whitewater.py` spray, foam and bubbles from trapped-air, wave-crest and kinetic-energy potentials (Ihmsen, Akinci, Becker and Teschner, "Unified spray, foam and air bubbles for particle-based fluids", 2012): emission, advection, per-point kind.
-- `surface.py` velocity-stretched particle splats to a density field, marching cubes, field-gradient normals.
+- `surface.py` anisotropic particle kernels to a density field, marching cubes, field-gradient normals.
 - `export.py` the frame sequence writer. `preview.py` the point-cloud PNG. `run.py` the command line.
 
 ## Not done yet
 
-Surface tension, particle separation, a multigrid preconditioner, moving obstacles, viscosity.
+Surface tension, a multigrid preconditioner, moving obstacles.
 
 ## Licence
 

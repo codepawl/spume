@@ -24,6 +24,8 @@ import warp as wp
 import flip
 import preview
 import pressure
+import sparse
+from launcher import Launcher
 import surface
 import whitewater
 from export import SequenceWriter
@@ -49,6 +51,7 @@ def parse_arguments():
     parser.add_argument("--obstacle-mask", default=None, help=".npy bool array (nx, ny, nz) of solid cells on the solver grid")
     parser.add_argument("--obstacle-box", type=float, nargs=6, action="append", default=[], metavar=("X0", "Y0", "Z0", "X1", "Y1", "Z1"), help="solid box in domain metres (repeatable)")
     parser.add_argument("--outflow-box", type=float, nargs=6, action="append", default=[], metavar=("X0", "Y0", "Z0", "X1", "Y1", "Z1"), help="region in domain metres that deletes liquid and whitewater (repeatable)")
+    parser.add_argument("--liquid-box", type=float, nargs=6, action="append", default=[], metavar=("X0", "Y0", "Z0", "X1", "Y1", "Z1"), help="liquid at rest in this box at the start, in domain metres (repeatable): a pool or a tank")
     parser.add_argument("--inflow-height", type=float, default=1.5, help="side inflow: height of the opening centre above the floor, metres")
     parser.add_argument("--shape", choices=["circle", "rectangle"], default="circle", help="shape of the opening")
     parser.add_argument("--opening", type=float, default=0.6, help="circle opening diameter, metres")
@@ -59,17 +62,21 @@ def parse_arguments():
     parser.add_argument("--feed", type=float, default=2.2, help="seconds the jet is held at full speed")
     parser.add_argument("--taper", type=float, default=1.0, help="seconds the jet takes to die away after the feed")
     parser.add_argument("--cone", type=float, default=0.03, help="sideways speed at the rim as a fraction of the jet speed")
-    parser.add_argument("--turbulence", type=float, default=0.12, help="random variation of the inflow speed, fraction")
+    parser.add_argument("--turbulence", type=float, default=0.08, help="slow waves in the inflow's speed and direction, fraction of the speed. Higher breaks the jet up sooner")
     parser.add_argument("--particles-per-cell", type=int, default=8)
+    parser.add_argument("--separation", type=float, default=1.5, help="share of a cell's extra crowding the pressure solve pushes apart per step. Gives impacts their splash back")
     parser.add_argument("--flip", type=float, default=0.97, help="FLIP share of the PIC/FLIP blend")
     parser.add_argument("--cfl", type=float, default=1.0)
-    parser.add_argument("--pressure", choices=["sor", "cg"], default="sor", help="pressure solver: red-black SOR, or Jacobi-preconditioned conjugate gradients")
-    parser.add_argument("--iterations", type=int, default=60, help="pressure iterations per step (SOR sweeps or CG iterations)")
+    parser.add_argument("--pressure", choices=["sor", "cg"], default="cg", help="pressure solver: Jacobi-preconditioned conjugate gradients, or red-black SOR")
+    parser.add_argument("--iterations", type=int, default=20, help="pressure iterations per step (CG iterations or SOR sweeps; SOR needs about 60)")
     parser.add_argument("--omega", type=float, default=1.9, help="over-relaxation factor")
+    parser.add_argument("--viscosity", type=float, default=0.0, help="kinematic viscosity, m^2/s (water 1e-6 is 0 here, honey about 0.01, thick cream about 0.1). Use a low --flip with it")
+    parser.add_argument("--floor-friction", type=float, default=0.0, help="slows liquid in the cell row on the floor, per second. A slip floor makes a fast sheet thinner than a cell, which the mesh cannot show. Try 5 to 15")
+    parser.add_argument("--viscosity-iterations", type=int, default=20, help="Jacobi sweeps of the viscosity solve per step (rounded down to even)")
     parser.add_argument("--max-particles", type=int, default=3_000_000)
     parser.add_argument("--mesh-cell", type=float, default=0.1, help="marching cubes cell size, metres")
     parser.add_argument("--mesh-radius", type=float, default=2.2, help="splat radius in mesh cells")
-    parser.add_argument("--iso", type=float, default=0.3, help="surface level as a fraction of the interior density")
+    parser.add_argument("--iso", type=float, default=0.35, help="surface level as a fraction of the interior density")
     parser.add_argument("--no-whitewater", action="store_true", help="skip spray, foam and bubbles entirely (no emission, no advection, empty spray files)")
     parser.add_argument("--ww-capacity", type=int, default=2_500_000)
     parser.add_argument("--ww-trapped-rate", type=float, default=60.0)
@@ -102,6 +109,7 @@ class Inflow:
     rise: float
     feed: float
     taper: float
+    delay: float = 0.0
     across: np.ndarray = None
     up_across: np.ndarray = None
 
@@ -119,6 +127,9 @@ class Inflow:
 
     def speed_at(self, seconds):
         """Pressure pulse: smooth rise, a held feed, then a smooth collapse to zero."""
+        seconds -= self.delay
+        if seconds <= 0.0:
+            return 0.0
         rise = min(1.0, seconds / self.rise)
         gain = rise * rise * (3.0 - 2.0 * rise)
         after_feed = (seconds - self.feed) / self.taper
@@ -130,7 +141,7 @@ class Inflow:
     def settings(self):
         return {
             "mode": self.mode, "position": list(self.centre), "direction": self.direction.tolist(), "shape": self.shape,
-            "size": [self.half_across * 2.0, self.half_up * 2.0], "speed": self.speed, "rise": self.rise, "feed": self.feed, "taper": self.taper,
+            "size": [self.half_across * 2.0, self.half_up * 2.0], "speed": self.speed, "rise": self.rise, "feed": self.feed, "taper": self.taper, "delay": self.delay,
         }
 
 
@@ -161,7 +172,7 @@ def make_inflow(entry, options, length):
         area = math.pi * half_across**2
     return Inflow(
         mode=mode, centre=tuple(float(value) for value in position), direction=direction, shape=shape, half_across=half_across, half_up=half_up, area=area,
-        speed=float(entry.get("speed", options.speed)), rise=float(entry.get("rise", options.rise)), feed=float(entry.get("feed", options.feed)), taper=float(entry.get("taper", options.taper)),
+        speed=float(entry.get("speed", options.speed)), rise=float(entry.get("rise", options.rise)), feed=float(entry.get("feed", options.feed)), taper=float(entry.get("taper", options.taper)), delay=float(entry.get("delay", 0.0)),
     )
 
 
@@ -234,10 +245,12 @@ class Simulation:
         self.inflows = load_inflows(options, self.length)
         self.walls = flip.WALL_ALL if options.closed else flip.WALL_FLOOR | side_wall_bits(self.inflows, self.size, self.cell)
         device = self.device
+        self.launcher = Launcher(device)
         self.solid_host = load_obstacles(options, self.size, self.cell)
         self.solid = wp.array(self.solid_host.astype(np.int32) if self.solid_host is not None else np.zeros(self.size, np.int32), dtype=int, device=device)
         self.outflow_low, self.outflow_high = self.build_outflow_boxes()
-        self.cg = pressure.ConjugateGradient(self.size, device) if options.pressure == "cg" else None
+        self.cg = pressure.ConjugateGradient(self.size, device, self.launcher) if options.pressure == "cg" else None
+        self.active = sparse.ActiveRegion(self.size, device, self.launcher)
         shapes = {"u": (nx + 1, ny, nz), "v": (nx, ny + 1, nz), "w": (nx, ny, nz + 1)}
         self.velocity = {name: wp.zeros(shape, dtype=float, device=device) for name, shape in shapes.items()}
         self.old = {name: wp.zeros(shape, dtype=float, device=device) for name, shape in shapes.items()}
@@ -245,6 +258,7 @@ class Simulation:
         self.valid = {name: wp.zeros(shape, dtype=float, device=device) for name, shape in shapes.items()}
         self.scratch = {name: wp.zeros(shape, dtype=float, device=device) for name, shape in shapes.items()}
         self.scratch_valid = {name: wp.zeros(shape, dtype=float, device=device) for name, shape in shapes.items()}
+        self.viscous_source = {name: wp.zeros(shape, dtype=float, device=device) for name, shape in shapes.items()} if options.viscosity > 0.0 else None
         self.cell_count = wp.zeros(self.size, dtype=int, device=device)
         self.pressure = wp.zeros(self.size, dtype=float, device=device)
         self.divergence = wp.zeros(self.size, dtype=float, device=device)
@@ -259,6 +273,7 @@ class Simulation:
         self.alive = wp.zeros(capacity, dtype=int, device=device)
         self.particle_count = 0
         self.spawn_remainder = 0.0
+        self.fill_liquid_boxes()
 
         ww = 1 if options.no_whitewater else options.ww_capacity
         export_capacity = 1 if options.no_whitewater else options.ww_export
@@ -274,10 +289,32 @@ class Simulation:
         self.export_counter = wp.zeros(1, dtype=int, device=device)
 
         mesh_size = tuple(int(math.ceil(extent / options.mesh_cell)) + 1 for extent in (self.length, options.height, options.width))
-        self.surface = surface.SurfaceExtractor(mesh_size, (0.0, 0.0, 0.0), options.mesh_cell, device, radius_cells=options.mesh_radius)
+        self.surface = surface.SurfaceExtractor(mesh_size, (0.0, 0.0, 0.0), options.mesh_cell, self.cell, device, radius_cells=options.mesh_radius)
         self.iso_threshold = options.iso * surface.interior_density(options.particles_per_cell, self.cell, self.surface.radius)
         self.step_index = 0
         self.timers = {"sim": 0.0, "whitewater": 0.0, "mesh": 0.0, "export": 0.0}
+
+    def fill_liquid_boxes(self):
+        """Particles at rest in every --liquid-box, skipping solid cells, jittered inside their cells."""
+        options = self.options
+        random = np.random.default_rng(options.seed)
+        batches = []
+        for box in options.liquid_box:
+            mask = np.zeros(self.size, bool)
+            paint_box(mask, box, self.cell)
+            if self.solid_host is not None:
+                mask &= ~self.solid_host
+            cells = np.argwhere(mask).repeat(options.particles_per_cell, axis=0)
+            batches.append((cells + random.random(cells.shape)) * self.cell)
+        if not batches:
+            return
+        positions = np.concatenate(batches).astype(np.float32)
+        if len(positions) > self.positions.shape[0]:
+            raise SystemExit(f"--liquid-box needs {len(positions)} particles, --max-particles is {self.positions.shape[0]}")
+        count = len(positions)
+        wp.copy(self.positions, wp.array(positions, dtype=wp.vec3, device=self.device), count=count)
+        wp.copy(self.alive, wp.array(np.ones(count, np.int32), dtype=int, device=self.device), count=count)
+        self.particle_count = count
 
     def build_outflow_boxes(self):
         boxes = self.options.outflow_box
@@ -292,22 +329,45 @@ class Simulation:
             self.launch(flip.remove_in_boxes, count, [positions, self.outflow_low, self.outflow_high, alive, life, use_life])
 
     def launch(self, kernel, dim, inputs):
-        wp.launch(kernel, dim=dim, inputs=inputs, device=self.device)
+        self.launcher.launch(kernel, dim, inputs)
 
-    def extend(self, passes=3):
+    def extend(self, passes=2):
+        """Velocity extrapolation into faces no particle touched, for whitewater: liquid particles only read faces they splatted to, which keep their value.
+        An even pass count ends back in the original array, so nothing is copied."""
         for name in ("u", "v", "w"):
             original = self.velocity[name]
             field, scratch = original, self.scratch[name]
             valid, scratch_valid = self.valid[name], self.scratch_valid[name]
-            self.launch(flip.mark_valid, self.weight[name].shape, [self.weight[name], valid])
+            scratch.zero_()
+            valid.zero_()
+            scratch_valid.zero_()
+            self.launch(flip.mark_valid, self.active.thread_count(), [self.active.blocks, self.weight[name], valid])
             for _ in range(passes):
-                self.launch(flip.extend_face, field.shape, [field, valid, scratch, scratch_valid])
+                self.launch(flip.extend_face, self.active.thread_count(), [self.active.blocks, field, valid, scratch, scratch_valid])
                 field, scratch = scratch, field
                 valid, scratch_valid = scratch_valid, valid
             if field is not original:
                 wp.copy(original, field)
 
-    def spawn(self, index, inflow, speed, delta_time):
+    def diffuse(self, delta_time):
+        """Implicit viscosity on the liquid faces, by Jacobi sweeps from the current velocity. An even sweep count ends back in the velocity array."""
+        options = self.options
+        blend = options.viscosity * delta_time / (self.cell * self.cell)
+        threads = self.active.thread_count()
+        for axis, name in enumerate(("u", "v", "w")):
+            field, scratch = self.velocity[name], self.scratch[name]
+            source = self.viscous_source[name]
+            wp.copy(source, field)
+            for _ in range(options.viscosity_iterations // 2 * 2):
+                self.launch(flip.diffuse_face, threads, [self.active.blocks, field, source, self.weight[name], self.solid, axis, blend, self.walls, scratch])
+                field, scratch = scratch, field
+
+    def inflow_phase(self, inflow, seconds):
+        """A jet flaps at a Strouhal number of about 0.3: speed over diameter sets how fast the waves at its opening change."""
+        flaps_per_second = 0.3 * inflow.speed / (2.0 * max(inflow.half_across, inflow.half_up))
+        return 2.0 * math.pi * flaps_per_second * seconds + 1.7 * self.inflows.index(inflow)
+
+    def spawn(self, index, inflow, speed, delta_time, seconds):
         options = self.options
         particle_volume = self.cell**3 / options.particles_per_cell
         wanted = inflow.area * speed * delta_time / particle_volume + inflow.spawn_remainder
@@ -321,7 +381,7 @@ class Simulation:
                 [
                     self.positions, self.velocities, self.alive, self.particle_count,
                     inflow.gpu_centre, inflow.gpu_direction, inflow.gpu_across, inflow.gpu_up_across, inflow.shape_code, inflow.half_across, inflow.half_up,
-                    speed, delta_time, options.cone, options.turbulence, self.step_index, options.seed + index * 1000003,
+                    speed, delta_time, options.cone, options.turbulence, self.inflow_phase(inflow, seconds), self.step_index, options.seed + index * 1000003,
                 ],
             )
             self.particle_count += count
@@ -332,11 +392,14 @@ class Simulation:
         speeds = [inflow.speed_at(seconds) for inflow in self.inflows]
         started = time.perf_counter()
         for index, inflow in enumerate(self.inflows):
-            self.spawn(index, inflow, speeds[index], delta_time)
+            self.spawn(index, inflow, speeds[index], delta_time, seconds)
         for name in ("u", "v", "w"):
             self.velocity[name].zero_()
             self.weight[name].zero_()
         self.cell_count.zero_()
+        self.active.update_blocks(self.positions, self.alive, self.particle_count, inverse_cell)
+        threads = self.active.thread_count()
+        blocks = self.active.blocks
         u, v, w = self.velocity["u"], self.velocity["v"], self.velocity["w"]
         self.launch(
             flip.particles_to_grid,
@@ -344,33 +407,39 @@ class Simulation:
             [self.positions, self.velocities, self.alive, inverse_cell, u, self.weight["u"], v, self.weight["v"], w, self.weight["w"], self.cell_count],
         )
         for name in ("u", "v", "w"):
-            self.launch(flip.normalise_face, self.velocity[name].shape, [self.velocity[name], self.weight[name], self.old[name]])
-        self.extend()
-        for name in ("u", "v", "w"):
-            wp.copy(self.old[name], self.velocity[name])
-        self.launch(flip.add_gravity, v.shape, [v, delta_time])
+            self.launch(flip.normalise_face, threads, [blocks, self.velocity[name], self.weight[name], self.old[name]])
+        self.active.update_cells(self.cell_count, self.solid)
+        self.launch(flip.add_gravity, threads, [blocks, v, delta_time])
         for axis, (field, face_offset) in enumerate(((u, (0.0, 0.5, 0.5)), (v, (0.5, 0.0, 0.5)), (w, (0.5, 0.5, 0.0)))):
-            self.launch(flip.enforce_walls, field.shape, [field, axis, self.walls])
+            self.launch(flip.enforce_walls, threads, [blocks, field, axis, self.walls])
             if self.solid_host is not None:
-                self.launch(flip.enforce_solids, field.shape, [field, axis, self.solid])
+                self.launch(flip.enforce_solids, threads, [blocks, field, axis, self.solid])
             for index, inflow in enumerate(self.inflows):
+                if speeds[index] <= 0.0:
+                    continue
                 self.launch(
                     flip.set_opening_velocity,
-                    field.shape,
+                    threads,
                     [
-                        field, axis, self.cell, wp.vec3(*face_offset), inflow.gpu_centre, inflow.gpu_direction, inflow.gpu_across, inflow.gpu_up_across,
-                        inflow.shape_code, inflow.half_across, inflow.half_up, speeds[index], options.cone, options.turbulence, self.step_index, options.seed + index * 1000003,
+                        blocks, field, axis, self.cell, wp.vec3(*face_offset), inflow.gpu_centre, inflow.gpu_direction, inflow.gpu_across, inflow.gpu_up_across,
+                        inflow.shape_code, inflow.half_across, inflow.half_up, speeds[index], options.cone, options.turbulence, self.inflow_phase(inflow, seconds),
                     ],
                 )
-        self.launch(flip.compute_divergence, self.size, [u, v, w, self.cell_count, self.solid, inverse_cell, self.divergence, self.pressure])
+        if self.viscous_source is not None:
+            self.diffuse(delta_time)
+        if options.floor_friction > 0.0:
+            keep = math.exp(-options.floor_friction * delta_time)
+            self.launch(flip.damp_floor_layer, threads, [blocks, u, keep])
+            self.launch(flip.damp_floor_layer, threads, [blocks, w, keep])
+        self.launch(flip.compute_divergence, threads, [blocks, u, v, w, self.cell_count, self.solid, inverse_cell, self.divergence, self.pressure, float(options.particles_per_cell), options.separation / delta_time])
         self.project()
-        self.launch(flip.apply_pressure_u, u.shape, [u, self.pressure, self.cell_count, self.solid, inverse_cell, self.walls])
-        self.launch(flip.apply_pressure_v, v.shape, [v, self.pressure, self.cell_count, self.solid, inverse_cell, self.walls])
-        self.launch(flip.apply_pressure_w, w.shape, [w, self.pressure, self.cell_count, self.solid, inverse_cell, self.walls])
+        self.launch(flip.apply_pressure_u, threads, [blocks, u, self.pressure, self.cell_count, self.solid, inverse_cell, self.walls])
+        self.launch(flip.apply_pressure_v, threads, [blocks, v, self.pressure, self.cell_count, self.solid, inverse_cell, self.walls])
+        self.launch(flip.apply_pressure_w, threads, [blocks, w, self.pressure, self.cell_count, self.solid, inverse_cell, self.walls])
         self.extend()
         if self.solid_host is not None:
             for axis, field in enumerate((u, v, w)):
-                self.launch(flip.enforce_solids, field.shape, [field, axis, self.solid])
+                self.launch(flip.enforce_solids, threads, [blocks, field, axis, self.solid])
         self.launch(
             flip.grid_to_particles,
             self.particle_count,
@@ -391,18 +460,22 @@ class Simulation:
         """Solve for the pressure that makes the velocity divergence free."""
         options = self.options
         if self.cg is not None:
-            self.cg.solve(self.pressure, self.divergence, self.cell_count, self.solid, self.cell, self.walls, options.iterations)
+            self.cg.solve(self.active.cells, self.active.cell_count, self.pressure, self.divergence, self.cell_count, self.solid, self.cell, self.walls, options.iterations)
             return
         for _ in range(options.iterations):
             for parity in (0, 1):
-                self.launch(flip.relax_pressure, self.size, [self.pressure, self.divergence, self.cell_count, self.solid, self.cell, options.omega, parity, self.walls])
+                self.launch(flip.relax_pressure, self.active.cell_count, [self.active.cells, self.pressure, self.divergence, self.cell_count, self.solid, self.cell, options.omega, parity, self.walls])
 
     def update_whitewater(self, delta_time):
         options = self.options
         inverse_cell = 1.0 / self.cell
         u, v, w = self.velocity["u"], self.velocity["v"], self.velocity["w"]
-        self.launch(whitewater.cell_fields, self.size, [u, v, w, self.cell_count, inverse_cell, float(options.particles_per_cell), self.density, self.shear])
-        self.launch(whitewater.density_normals, self.size, [self.density, self.normals[0], self.normals[1], self.normals[2]])
+        for field in (self.density, self.shear, *self.normals):
+            field.zero_()
+        threads = self.active.thread_count()
+        blocks = self.active.blocks
+        self.launch(whitewater.cell_fields, threads, [blocks, u, v, w, self.cell_count, inverse_cell, float(options.particles_per_cell), self.density, self.shear])
+        self.launch(whitewater.density_normals, threads, [blocks, self.density, self.normals[0], self.normals[1], self.normals[2]])
         self.launch(
             whitewater.emit_whitewater,
             self.particle_count,
@@ -453,13 +526,13 @@ class Simulation:
         return positions[::step], speeds[::step]
 
     def head_height(self):
-        alive = self.alive.numpy()[: self.particle_count] == 1
-        heights = self.positions.numpy()[: self.particle_count][alive][:, 1]
+        alive = self.alive[: self.particle_count].numpy() == 1
+        heights = self.positions[: self.particle_count].numpy()[alive][:, 1]
         return float(np.percentile(heights, 99.8)) if len(heights) else 0.0
 
     def residual(self):
         self.worst_divergence.zero_()
-        self.launch(flip.residual_divergence, self.size, [self.velocity["u"], self.velocity["v"], self.velocity["w"], self.cell_count, 1.0 / self.cell, self.worst_divergence])
+        self.launch(flip.residual_divergence, self.active.cell_count, [self.active.cells, self.velocity["u"], self.velocity["v"], self.velocity["w"], self.cell_count, 1.0 / self.cell, self.worst_divergence])
         return float(self.worst_divergence.numpy()[0])
 
 
@@ -474,7 +547,8 @@ def main():
     peak_mib = baseline_mib
     simulation = Simulation(options)
     writer = SequenceWriter(Path(options.out), options.name, options.fps)
-    reference_velocity = max(max(inflow.speed for inflow in simulation.inflows) * 1.1, 8.0)
+    # the fastest of the inflows and a free fall from the top of the domain
+    reference_velocity = max(max(inflow.speed for inflow in simulation.inflows) * 1.1, math.sqrt(2.0 * flip.GRAVITY * options.height))
     steps_per_frame = max(1, math.ceil((1.0 / options.fps) / (options.cfl * options.cell / reference_velocity)))
     delta_time = 1.0 / options.fps / steps_per_frame
     first_centre = simulation.inflows[0].centre
@@ -492,7 +566,7 @@ def main():
         if frame < skipped_frames:
             continue
         started = time.perf_counter()
-        vertices, normals, indices = simulation.surface.extract(simulation.positions[: simulation.particle_count], simulation.velocities[: simulation.particle_count], simulation.alive[: simulation.particle_count], simulation.iso_threshold)
+        vertices, normals, indices = simulation.surface.extract(simulation.positions[: simulation.particle_count], simulation.alive[: simulation.particle_count], simulation.iso_threshold)
         wp.synchronize_device(options.device)
         if simulation.solid_host is not None and len(vertices):
             vertices = push_out_of_solid(vertices, normals, simulation.solid_host, options.cell)
@@ -504,7 +578,8 @@ def main():
         simulation.timers["export"] += time.perf_counter() - started
         if frame in snapshot_frames:
             snapshots.append(simulation.snapshot(offset))
-        peak_mib = max(peak_mib, video_memory_used_mib())
+        if frame % 30 == 0:
+            peak_mib = max(peak_mib, video_memory_used_mib())
         residual = simulation.residual()
         residuals.append(residual)
         if frame % 10 == 0 or frame == options.frames - 1:

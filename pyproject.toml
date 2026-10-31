@@ -1,6 +1,6 @@
 [project]
 name = "spume-sim"
-version = "0.2.0"
+version = "0.3.0"
 description = "Spume: a GPU liquid solver (NVIDIA Warp): FLIP, whitewater, marching cubes, frame-sequence export"
 requires-python = ">=3.12,<3.13"
 dependencies = ["warp-lang>=1.12", "numpy", "psutil", "pillow"]

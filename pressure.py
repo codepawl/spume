@@ -49,6 +49,7 @@ def stencil(
 
 @wp.kernel
 def cg_start(
+    cells: wp.array(dtype=wp.vec3i),
     pressure: wp.array3d(dtype=float),
     divergence: wp.array3d(dtype=float),
     cell_count: wp.array3d(dtype=int),
@@ -61,12 +62,13 @@ def cg_start(
     scalars: wp.array(dtype=float),
 ):
     """residual = b - A p, direction = M^-1 residual; scalars[0] accumulates residual . direction."""
-    i, j, k = wp.tid()
+    cell_index = cells[wp.tid()]
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     residual[i, j, k] = 0.0
     direction[i, j, k] = 0.0
     inverse_diagonal[i, j, k] = 0.0
-    if cell_count[i, j, k] == 0 or solid[i, j, k] == 1:
-        return
     around = stencil(pressure, cell_count, solid, walls, i, j, k)
     if around[0] < 1.0:
         return
@@ -80,6 +82,7 @@ def cg_start(
 
 @wp.kernel
 def cg_multiply(
+    cells: wp.array(dtype=wp.vec3i),
     direction: wp.array3d(dtype=float),
     cell_count: wp.array3d(dtype=int),
     solid: wp.array3d(dtype=int),
@@ -89,7 +92,10 @@ def cg_multiply(
     scalars: wp.array(dtype=float),
 ):
     """product = A direction; scalars[2] accumulates direction . product."""
-    i, j, k = wp.tid()
+    cell_index = cells[wp.tid()]
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     product[i, j, k] = 0.0
     if inverse_diagonal[i, j, k] == 0.0:
         return
@@ -101,6 +107,7 @@ def cg_multiply(
 
 @wp.kernel
 def cg_update(
+    cells: wp.array(dtype=wp.vec3i),
     pressure: wp.array3d(dtype=float),
     residual: wp.array3d(dtype=float),
     direction: wp.array3d(dtype=float),
@@ -109,7 +116,10 @@ def cg_update(
     scalars: wp.array(dtype=float),
 ):
     """pressure += alpha direction; residual -= alpha product; scalars[1] accumulates residual . (M^-1 residual)."""
-    i, j, k = wp.tid()
+    cell_index = cells[wp.tid()]
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     if inverse_diagonal[i, j, k] == 0.0:
         return
     alpha = float(0.0)
@@ -123,13 +133,17 @@ def cg_update(
 
 @wp.kernel
 def cg_direction(
+    cells: wp.array(dtype=wp.vec3i),
     residual: wp.array3d(dtype=float),
     direction: wp.array3d(dtype=float),
     inverse_diagonal: wp.array3d(dtype=float),
     scalars: wp.array(dtype=float),
 ):
     """direction = M^-1 residual + beta direction."""
-    i, j, k = wp.tid()
+    cell_index = cells[wp.tid()]
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     if inverse_diagonal[i, j, k] == 0.0:
         return
     beta = float(0.0)
@@ -148,8 +162,9 @@ def cg_roll_scalars(scalars: wp.array(dtype=float)):
 class ConjugateGradient:
     """Preconditioned conjugate gradients for the pressure Poisson system. One instance holds the work arrays."""
 
-    def __init__(self, size, device):
+    def __init__(self, size, device, launcher):
         self.device = device
+        self.launcher = launcher
         self.residual = wp.zeros(size, dtype=float, device=device)
         self.direction = wp.zeros(size, dtype=float, device=device)
         self.product = wp.zeros(size, dtype=float, device=device)
@@ -157,14 +172,14 @@ class ConjugateGradient:
         self.scalars = wp.zeros(3, dtype=float, device=device)
         self.size = size
 
-    def launch(self, kernel, inputs, dim=None):
-        wp.launch(kernel, dim=dim or self.size, inputs=inputs, device=self.device)
+    def launch(self, kernel, inputs, dim):
+        self.launcher.launch(kernel, dim, inputs)
 
-    def solve(self, pressure, divergence, cell_count, solid, cell, walls, iterations):
+    def solve(self, cells, cell_total, pressure, divergence, cell_count, solid, cell, walls, iterations):
         self.scalars.zero_()
-        self.launch(cg_start, [pressure, divergence, cell_count, solid, cell, walls, self.residual, self.direction, self.inverse_diagonal, self.scalars])
+        self.launch(cg_start, [cells, pressure, divergence, cell_count, solid, cell, walls, self.residual, self.direction, self.inverse_diagonal, self.scalars], dim=cell_total)
         for _ in range(iterations):
-            self.launch(cg_multiply, [self.direction, cell_count, solid, self.inverse_diagonal, walls, self.product, self.scalars])
-            self.launch(cg_update, [pressure, self.residual, self.direction, self.product, self.inverse_diagonal, self.scalars])
-            self.launch(cg_direction, [self.residual, self.direction, self.inverse_diagonal, self.scalars])
+            self.launch(cg_multiply, [cells, self.direction, cell_count, solid, self.inverse_diagonal, walls, self.product, self.scalars], dim=cell_total)
+            self.launch(cg_update, [cells, pressure, self.residual, self.direction, self.product, self.inverse_diagonal, self.scalars], dim=cell_total)
+            self.launch(cg_direction, [cells, self.residual, self.direction, self.inverse_diagonal, self.scalars], dim=cell_total)
             self.launch(cg_roll_scalars, [self.scalars], dim=1)

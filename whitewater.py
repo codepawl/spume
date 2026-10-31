@@ -13,6 +13,7 @@ the local liquid density: spray (little liquid: ballistic), foam (surface: follo
 import warp as wp
 
 from flip import GRAVITY, clamp_index, is_wall, resolve_solid, sample_field
+from sparse import cell_of_thread, outside
 
 SPRAY, FOAM, BUBBLE = 0, 1, 2
 
@@ -23,6 +24,7 @@ WALL_MARGIN = 0.01
 
 @wp.kernel
 def cell_fields(
+    blocks: wp.array(dtype=wp.vec3i),
     u: wp.array3d(dtype=float),
     v: wp.array3d(dtype=float),
     w: wp.array3d(dtype=float),
@@ -33,7 +35,12 @@ def cell_fields(
     shear: wp.array3d(dtype=float),
 ):
     """Smoothed liquid density (1 = full) and velocity-gradient norm (1/s) per cell."""
-    i, j, k = wp.tid()
+    cell_index = cell_of_thread(blocks, wp.tid())
+    if outside(density, cell_index):
+        return
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     size_x = density.shape[0]
     size_y = density.shape[1]
     size_z = density.shape[2]
@@ -52,13 +59,19 @@ def cell_fields(
 
 @wp.kernel
 def density_normals(
+    blocks: wp.array(dtype=wp.vec3i),
     density: wp.array3d(dtype=float),
     normal_x: wp.array3d(dtype=float),
     normal_y: wp.array3d(dtype=float),
     normal_z: wp.array3d(dtype=float),
 ):
     """Outward surface normal = -gradient of the smoothed density."""
-    i, j, k = wp.tid()
+    cell_index = cell_of_thread(blocks, wp.tid())
+    if outside(density, cell_index):
+        return
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     size_x = density.shape[0]
     size_y = density.shape[1]
     size_z = density.shape[2]
