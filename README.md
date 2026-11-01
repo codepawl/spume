@@ -142,7 +142,7 @@ On a thin faucet stream, keep `--turbulence` low, about 0.06. A high value twist
 
 - The mesher pushes vertices out of obstacles on the GPU (`push_out_of_solid` in `surface.py`). A host loop did this before, and it was the slowest step of a mesh. It took 105 to 130 ms a frame at 330k to 470k particles. Marching cubes takes 40 ms, the kernel fit 5 to 13 ms and the blur 8 ms.
 
-The scene at the top of this page uses a 0.025 m mesh and no whitewater. It took 130 s on an RTX 3060 that another job was also using (simulation 31 s, mesh 83 s). With the obstacle push on the GPU, the mesh step of frames 40 and 100 takes 61 and 71 ms instead of 161 and 210 ms. These are back-to-back runs on the same particles and GPU. The meshes have the same vertex count and a volume within 0.1%. That 130 s has not been measured again, because other jobs kept the GPU and CPU busy and whole-bake times swung two to four times.
+The scene at the top of this page uses a 0.025 m mesh and no whitewater. It took 130 s on an RTX 3060 that another job was also using (simulation 31 s, mesh 83 s). With the push on the GPU, the mesh step of frames 40 and 100 takes 61 and 71 ms, down from 161 and 210 ms. These are back-to-back runs on the same particles and GPU. The meshes have the same vertex count and a volume within 0.1%. That 130 s has not been measured again, because other jobs kept the GPU and CPU busy and whole-bake times swung two to four times.
 
 ## Output
 
@@ -181,7 +181,7 @@ uv run pytest
 
 ## Known faults
 
-- Floor water is joined more than before but not like Mantaflow's. On the comparison scene at frame 100, the largest mesh component holds 85% of the floor-water area, up from 39% (Mantaflow: 81%). The mesh has 346 components, down from 3890 (Mantaflow: 81). At frame 60 the share is 77% (Mantaflow 90%). `MIN_NEIGHBOURS = 8` in `surface.py` caused the crumbs. The edge of a sheet one cell deep has 3 to 7 neighbours, so its particles became droplets. Water one particle thick at the far edge of a sheet now falls under the iso level and does not show. The water is thinner than Mantaflow's (median 6 cm against 10 cm, same measure), and no thicker than before at the 90th percentile (12.7 cm).
+- Floor water is joined more than before but not like Mantaflow's. At frame 100 of the comparison scene, the largest component holds 85% of the floor water, up from 39% (Mantaflow: 81%). The mesh has 346 components, down from 3890 (Mantaflow: 81). At frame 60 the share is 77% (Mantaflow 90%). `MIN_NEIGHBOURS = 8` in `surface.py` caused the crumbs. The edge of a sheet one cell deep has 3 to 7 neighbours, so its particles became droplets. Water one particle thick at the far edge of a sheet now falls under the iso level. The water is thinner than Mantaflow's (median 6 cm against 10 cm, same measure), and no thicker than before at the 90th percentile (12.7 cm).
 - The mesh step is still 40 ms of marching cubes over the whole mesh grid. Marching only the active region can cost less.
 
 ## Not done yet
