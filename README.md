@@ -181,8 +181,8 @@ uv run pytest
 
 ## Known faults
 
-- Water on the floor ends in crumbs at its edges, not in sheets.
-- The mesh takes most of the bake time, 83 s of 130 s in the scene above.
+- Floor water is joined more than before but not like Mantaflow's. On the comparison scene at frame 100, 85% of the floor-water area is in the largest mesh component (Mantaflow: 81%), up from 39%, and the mesh has 346 components instead of 3890. At frame 60 the share is 77% (Mantaflow 90%). The cause was `MIN_NEIGHBOURS = 8` in `surface.py`: the edge of a sheet one cell deep has 3 to 7 neighbours, so its particles became droplets. Water that is a single particle thick at the far edge of a sheet now falls under the iso level instead of showing as beads. The water is thinner than Mantaflow's (median 6 cm against 10 cm, same measure), and no thicker than before at the 90th percentile (12.7 cm).
+- The mesh step is still 40 ms of marching cubes over the whole mesh grid. Only the active region would be cheaper.
 
 ## Not done yet
 

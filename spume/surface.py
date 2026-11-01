@@ -18,15 +18,16 @@ CENTRE_SMOOTHING = 0.9
 # Longest kernel axis over the shortest.
 MAX_KERNEL_RATIO = 4.0
 # With fewer neighbours than this, a particle is a droplet: a small round kernel.
-MIN_NEIGHBOURS = 8
+# The edge of a sheet one cell deep has 3 to 7 neighbours. At 8 it was split into droplets, which broke floor water into crumbs.
+MIN_NEIGHBOURS = 2
 DROPLET_SCALE = 0.75
 # Passes of a small blur on the density field: it joins grains on a sheet and rounds droplets.
 BLUR_PASSES = 4
 # A particle with this many neighbours and axes this close in length counts as interior.
 INTERIOR_NEIGHBOURS = 30
 INTERIOR_ROUNDNESS = 1.5
-# Neighbour search radius in simulation cells. At 8 particles per cell this finds about 45 neighbours.
-NEIGHBOUR_RADIUS_CELLS = 1.1
+# Neighbour search radius in simulation cells. A thin sheet holds about 3 particles per cell face, so a wider radius gives its particles enough neighbours for a flat kernel.
+NEIGHBOUR_RADIUS_CELLS = 1.3
 # A vertex inside an obstacle moves out by half a solver cell per attempt.
 SOLID_PUSH_ATTEMPTS = 16
 
