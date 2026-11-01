@@ -332,8 +332,34 @@ def enforce_walls(blocks: wp.array(dtype=wp.vec3i), field: wp.array3d(dtype=floa
 
 
 MAX_CROWDING = 2.0
-# Random spacing puts more than the rest count in many cells of still water, and pushing those apart would swell a pool over its rim.
+# Random spacing puts more than the rest count in many cells of still water.
 CROWDING_START = 1.5
+# Pushing crowded cells apart leaves gaps, and a pool that keeps its gaps swells. Slow liquid inside the body of the water closes cells below this share of the rest count again.
+SPARSE_START = 0.6
+# Below this speed (m/s) a cell counts as settled and closes its gaps; fast liquid, as in a splash, keeps them.
+SETTLED_SPEED = 1.5
+
+
+@wp.func
+def is_interior(cell_count: wp.array3d(dtype=int), solid: wp.array3d(dtype=int), i: int, j: int, k: int) -> bool:
+    """True when all six neighbours hold liquid or are solid, so the cell is not at the free surface."""
+    for axis in range(3):
+        for side in range(2):
+            ni = i
+            nj = j
+            nk = k
+            step = 2 * side - 1
+            if axis == 0:
+                ni = i + step
+            elif axis == 1:
+                nj = j + step
+            else:
+                nk = k + step
+            if ni < 0 or nj < 0 or nk < 0 or ni >= cell_count.shape[0] or nj >= cell_count.shape[1] or nk >= cell_count.shape[2]:
+                return False
+            if cell_count[ni, nj, nk] == 0 and solid[ni, nj, nk] == 0:
+                return False
+    return True
 
 
 @wp.func
@@ -424,7 +450,14 @@ def compute_divergence(
         return
     # Particles packed tighter than at rest ask the pressure solve to push them apart. Without this an impact squeezes them together and its energy never comes back as splash.
     crowding = wp.clamp(float(cell_count[i, j, k]) / rest_count - CROWDING_START, 0.0, MAX_CROWDING)
-    divergence[i, j, k] = (u[i + 1, j, k] - u[i, j, k] + v[i, j + 1, k] - v[i, j, k] + w[i, j, k + 1] - w[i, j, k]) * inverse_cell - crowding * expansion_rate
+    raw_divergence = (u[i + 1, j, k] - u[i, j, k] + v[i, j + 1, k] - v[i, j, k] + w[i, j, k + 1] - w[i, j, k]) * inverse_cell
+    expansion = crowding * expansion_rate
+    if is_interior(cell_count, solid, i, j, k):
+        sparseness = wp.clamp(SPARSE_START - float(cell_count[i, j, k]) / rest_count, 0.0, SPARSE_START)
+        speed = wp.length(wp.vec3(0.5 * (u[i, j, k] + u[i + 1, j, k]), 0.5 * (v[i, j, k] + v[i, j + 1, k]), 0.5 * (w[i, j, k] + w[i, j, k + 1])))
+        settled = wp.clamp(1.0 - speed / SETTLED_SPEED, 0.0, 1.0)
+        expansion -= settled * sparseness * expansion_rate
+    divergence[i, j, k] = raw_divergence - expansion
 
 
 @wp.func

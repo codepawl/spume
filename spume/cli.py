@@ -64,7 +64,7 @@ def parse_arguments():
     parser.add_argument("--cone", type=float, default=0.03, help="sideways speed at the rim as a fraction of the jet speed")
     parser.add_argument("--turbulence", type=float, default=0.08, help="slow waves in the inflow's speed and direction, fraction of the speed. Higher breaks the jet up sooner")
     parser.add_argument("--particles-per-cell", type=int, default=8)
-    parser.add_argument("--separation", type=float, default=1.5, help="share of a cell's extra crowding the pressure solve pushes apart per step. Gives impacts their splash back")
+    parser.add_argument("--separation", type=float, default=1.5, help="share of a cell's extra crowding the pressure solve pushes apart per step. Gives impacts their splash back; slow water closes the gaps again, so a pool keeps its volume")
     parser.add_argument("--flip", type=float, default=0.97, help="FLIP share of the PIC/FLIP blend")
     parser.add_argument("--cfl", type=float, default=1.0)
     parser.add_argument("--pressure", choices=["sor", "cg"], default="cg", help="pressure solver: Jacobi-preconditioned conjugate gradients, or red-black SOR")
