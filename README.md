@@ -182,7 +182,6 @@ uv run pytest
 - `--separation` swells a still pool. One pool reached 0.54 m where the pumped volume gives about 0.46 m. It spilled late in the bake.
 - Water on the floor ends in crumbs at its edges, not in sheets.
 - The mesh takes most of the bake time, 83 s of 130 s in the scene above.
-- The Blender add-on has no fields for `--separation`, `--floor-friction`, `--turbulence` or `--flip`.
 
 ## Not done yet
 

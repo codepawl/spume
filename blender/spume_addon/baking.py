@@ -76,6 +76,8 @@ def core_arguments(context, domain, preview, folder):
         "--cell", f"{cell:.5f}", "--mesh-cell", f"{mesh_cell:.5f}", "--frames", str(frames),
         "--length", f"{length:.4f}", "--width", f"{width:.4f}", "--height", f"{height:.4f}",
         "--inflows", str(folder / "inflows.json"),
+        "--floor-friction", f"{settings.floor_friction:.3f}", "--separation", f"{settings.separation:.3f}",
+        "--turbulence", f"{settings.turbulence:.3f}", "--flip", f"{settings.flip:.3f}",
     ]
     if settings.use_whitewater and settings.whitewater_amount > 0.0:
         amount = settings.whitewater_amount

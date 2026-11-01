@@ -129,6 +129,11 @@ class SPUME_PT_domain(bpy.types.Panel):
         column.prop(settings, "mesh_cell_size")
         layout.prop(settings, "frames")
         layout.prop(settings, "start_frame")
+        column = layout.column(align=True)
+        column.prop(settings, "floor_friction")
+        column.prop(settings, "separation")
+        column.prop(settings, "turbulence")
+        column.prop(settings, "flip")
         layout.prop(settings, "use_whitewater")
         if settings.use_whitewater:
             layout.prop(settings, "whitewater_amount")
