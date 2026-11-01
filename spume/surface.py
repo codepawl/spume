@@ -18,15 +18,18 @@ CENTRE_SMOOTHING = 0.9
 # Longest kernel axis over the shortest.
 MAX_KERNEL_RATIO = 4.0
 # With fewer neighbours than this, a particle is a droplet: a small round kernel.
-MIN_NEIGHBOURS = 8
+# The edge of a sheet one cell deep has 3 to 7 neighbours. At 8 it was split into droplets, which broke floor water into crumbs.
+MIN_NEIGHBOURS = 2
 DROPLET_SCALE = 0.75
 # Passes of a small blur on the density field: it joins grains on a sheet and rounds droplets.
 BLUR_PASSES = 4
 # A particle with this many neighbours and axes this close in length counts as interior.
 INTERIOR_NEIGHBOURS = 30
 INTERIOR_ROUNDNESS = 1.5
-# Neighbour search radius in simulation cells. At 8 particles per cell this finds about 45 neighbours.
-NEIGHBOUR_RADIUS_CELLS = 1.1
+# Neighbour search radius in simulation cells. A thin sheet holds about 3 particles per cell face, so a wider radius gives its particles enough neighbours for a flat kernel.
+NEIGHBOUR_RADIUS_CELLS = 1.3
+# A vertex inside an obstacle moves out by half a solver cell per attempt.
+SOLID_PUSH_ATTEMPTS = 16
 
 
 @wp.kernel
@@ -177,6 +180,30 @@ def vertex_normals(
         normals[tid] = wp.vec3(0.0, 1.0, 0.0)
 
 
+@wp.kernel
+def push_out_of_solid(
+    vertices: wp.array(dtype=wp.vec3),
+    normals: wp.array(dtype=wp.vec3),
+    solid: wp.array3d(dtype=int),
+    origin: wp.vec3,
+    mesh_cell: float,
+    solver_cell: float,
+):
+    """Vertices that the particle splats left inside an obstacle move back along the opposite normal, towards the liquid."""
+    tid = wp.tid()
+    vertex = vertices[tid]
+    step = normals[tid] * (0.5 * solver_cell / mesh_cell)
+    for _attempt in range(SOLID_PUSH_ATTEMPTS):
+        metres = vertex * mesh_cell + origin
+        i = wp.clamp(int(wp.floor(metres[0] / solver_cell)), 0, solid.shape[0] - 1)
+        j = wp.clamp(int(wp.floor(metres[1] / solver_cell)), 0, solid.shape[1] - 1)
+        k = wp.clamp(int(wp.floor(metres[2] / solver_cell)), 0, solid.shape[2] - 1)
+        if solid[i, j, k] == 0:
+            break
+        vertex = vertex - step
+    vertices[tid] = vertex
+
+
 def interior_density(particles_per_cell: float, sim_cell: float, radius: float) -> float:
     """Field value deep inside the liquid: particle density times the integral of the (1 - r^2/R^2)^3 kernel."""
     samples = np.linspace(0.0, radius, 2000)
@@ -193,6 +220,7 @@ class SurfaceExtractor:
         self.cell = cell
         self.device = device
         self.radius = radius_cells * cell
+        self.sim_cell = sim_cell
         self.neighbour_radius = NEIGHBOUR_RADIUS_CELLS * sim_cell
         self.field = wp.zeros(size, dtype=float, device=device)
         self.blurred_field = wp.zeros(size, dtype=float, device=device)
@@ -216,8 +244,11 @@ class SurfaceExtractor:
                 wp.launch(blur_field_axis, dim=self.size, inputs=[self.field, step_i, step_j, step_k, self.blurred_field], device=self.device)
                 self.field, self.blurred_field = self.blurred_field, self.field
 
-    def extract(self, positions, alive, threshold):
-        """Returns (vertices in metres, normals, triangle indices) as numpy arrays."""
+    def extract(self, positions, alive, threshold, solid=None):
+        """Returns (vertices in metres, normals, triangle indices) as numpy arrays.
+
+        `solid` is the solver's int array of obstacle cells; vertices inside it are moved out on the device.
+        """
         particle_count = positions.shape[0]
         self.reserve_kernels(particle_count)
         self.grid.build(positions, self.neighbour_radius)
@@ -234,6 +265,8 @@ class SurfaceExtractor:
             return np.zeros((0, 3), np.float32), np.zeros((0, 3), np.float32), np.zeros(0, np.uint32)
         normals = wp.zeros(vertex_count, dtype=wp.vec3, device=self.device)
         wp.launch(vertex_normals, dim=vertex_count, inputs=[self.field, self.marching.verts, normals], device=self.device)
+        if solid is not None:
+            wp.launch(push_out_of_solid, dim=vertex_count, inputs=[self.marching.verts, normals, solid, wp.vec3(*self.origin), self.cell, self.sim_cell], device=self.device)
         vertices = self.marching.verts.numpy() * self.cell + np.asarray(self.origin, np.float32)
         # Warp's marching cubes winds its triangles inward. Viewers that cull back faces need them outward.
         outward_indices = self.marching.indices.numpy().astype(np.uint32).reshape(-1, 3)[:, [0, 2, 1]].ravel()

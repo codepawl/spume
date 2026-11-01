@@ -64,7 +64,7 @@ def parse_arguments():
     parser.add_argument("--cone", type=float, default=0.03, help="sideways speed at the rim as a fraction of the jet speed")
     parser.add_argument("--turbulence", type=float, default=0.08, help="slow waves in the inflow's speed and direction, fraction of the speed. Higher breaks the jet up sooner")
     parser.add_argument("--particles-per-cell", type=int, default=8)
-    parser.add_argument("--separation", type=float, default=1.5, help="share of a cell's extra crowding the pressure solve pushes apart per step. Gives impacts their splash back")
+    parser.add_argument("--separation", type=float, default=1.5, help="share of a cell's extra crowding the pressure solve pushes apart per step. Gives impacts their splash back; slow water closes the gaps again, so a pool keeps its volume")
     parser.add_argument("--flip", type=float, default=0.97, help="FLIP share of the PIC/FLIP blend")
     parser.add_argument("--cfl", type=float, default=1.0)
     parser.add_argument("--pressure", choices=["sor", "cg"], default="cg", help="pressure solver: Jacobi-preconditioned conjugate gradients, or red-black SOR")
@@ -236,18 +236,6 @@ def load_obstacles(options, size, cell):
     for box in options.obstacle_box:
         paint_box(mask, box, cell)
     return mask if mask.any() else None
-
-
-def push_out_of_solid(vertices, normals, mask, cell):
-    """Surface vertices that the particle splats left inside an obstacle move back along the opposite surface normal, towards the liquid."""
-    upper = np.array(mask.shape) - 1
-    for _ in range(16):
-        index = np.clip(np.floor(vertices / cell).astype(int), 0, upper)
-        inside = mask[index[:, 0], index[:, 1], index[:, 2]]
-        if not inside.any():
-            break
-        vertices[inside] -= normals[inside] * (0.5 * cell)
-    return vertices
 
 
 class Simulation:
@@ -584,10 +572,9 @@ def main():
         if frame < skipped_frames:
             continue
         started = time.perf_counter()
-        vertices, normals, indices = simulation.surface.extract(simulation.positions[: simulation.particle_count], simulation.alive[: simulation.particle_count], simulation.iso_threshold)
+        obstacle_cells = simulation.solid if simulation.solid_host is not None else None
+        vertices, normals, indices = simulation.surface.extract(simulation.positions[: simulation.particle_count], simulation.alive[: simulation.particle_count], simulation.iso_threshold, obstacle_cells)
         wp.synchronize_device(options.device)
-        if simulation.solid_host is not None and len(vertices):
-            vertices = push_out_of_solid(vertices, normals, simulation.solid_host, options.cell)
         simulation.timers["mesh"] += time.perf_counter() - started
         started = time.perf_counter()
         spray_positions, spray_velocities, spray_ids, spray_kinds, ww_alive = simulation.export_whitewater()

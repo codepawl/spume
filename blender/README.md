@@ -40,7 +40,7 @@ Select an object and open Properties > Physics > Spume. **Type** says what the o
 seconds: rise, hold, taper. Pointing the inflow up from the floor makes a floor jet at the object's X and Y; any other placement is a lateral
 opening at the object's position, and if it sits on a domain wall that wall is solid around the opening, like a pipe mouth.
 
-**Domain** settings: cell size and mesh cell size (metres), frames, start frame, whitewater on/off and amount, the cache folder
+**Domain** settings: cell size and mesh cell size (metres), frames, start frame, floor friction, separation, turbulence and FLIP ([what they do](../README.md#how-thin-or-thick-the-liquid-looks)), whitewater on/off and amount, the cache folder
 (`//spume_cache/` is next to the .blend file), and the preview scale and frames.
 
 - **Bake** runs the full settings, **Bake Preview** multiplies both cell sizes by the preview scale (2.5) and caps the frames (40).

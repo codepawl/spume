@@ -82,7 +82,7 @@ Units are metres, seconds, +Y up, the floor at y = 0 and the domain's low corner
 | Pressure | `--pressure cg\|sor`, `--iterations`, `--omega` (SOR only) |
 | Viscosity | `--viscosity` (m^2/s), `--viscosity-iterations` |
 | Floor | `--floor-friction` (per second): slows liquid in the cell row on the floor. A slip floor makes a fast sheet thinner than a cell. Try 1 to 3, higher keeps the water deep |
-| Liquid | `--liquid-box X0 Y0 Z0 X1 Y1 Z1` (repeatable; liquid at rest in the box at frame 0, solid cells skipped), `--particles-per-cell`, `--flip` (FLIP share of the PIC/FLIP blend), `--separation` (pushes crowded cells apart, so an impact splashes), `--cfl`, `--max-particles` |
+| Liquid | `--liquid-box X0 Y0 Z0 X1 Y1 Z1` (repeatable; liquid at rest in the box at frame 0, solid cells skipped), `--particles-per-cell`, `--flip` (FLIP share of the PIC/FLIP blend), `--separation` (pushes crowded cells apart, so an impact splashes; slow water closes the gaps again, so a pool keeps its volume), `--cfl`, `--max-particles` |
 | Surface | `--mesh-cell`, `--mesh-radius`, `--iso` |
 | Whitewater | `--no-whitewater`, `--ww-capacity`, `--ww-trapped-rate`, `--ww-crest-rate`, `--ww-life MIN MAX`, `--ww-export` (points kept per frame), `--ww-buoyancy`, `--ww-drag` |
 
@@ -131,7 +131,7 @@ These options set the look, from thin to thick:
 | `--iso` | 0.35 to 0.5: a thin surface | 0.2: a fat surface |
 | `--viscosity` | 0 | 0.01 for honey, 0.1 for thick cream |
 
-On a thin faucet stream, keep `--turbulence` low, about 0.06. A high value twists the stream. `--separation` also adds to the residual divergence in `report.json`, because it asks for divergence on purpose in crowded cells.
+On a thin faucet stream, keep `--turbulence` low, about 0.06. A high value twists the stream. `--separation` also adds to the residual divergence in `report.json`, because it asks for divergence on purpose in crowded cells. A pool fed by a faucet rose by the pumped volume to within 4% over 500 frames, measured at a 0.05 m cell.
 
 ## How it stays fast
 
@@ -140,7 +140,9 @@ On a thin faucet stream, keep `--turbulence` low, about 0.06. A high value twist
 - A step extrapolates velocity once, for whitewater. Liquid particles only read faces they splatted to.
 - The step size comes from the fastest inflow or a free fall from the top of the domain. A small scene takes no extra steps.
 
-The scene at the top of this page uses a 0.025 m mesh and no whitewater. It took 130 s on an RTX 3060 that another job was also using (simulation 31 s, mesh 83 s).
+- The mesher pushes vertices out of obstacles on the GPU (`push_out_of_solid` in `surface.py`). A host loop did this before, and it was the slowest step of a mesh. It took 105 to 130 ms a frame at 330k to 470k particles. Marching cubes takes 40 ms, the kernel fit 5 to 13 ms and the blur 8 ms.
+
+The scene at the top of this page uses a 0.025 m mesh and no whitewater. It took 130 s on an RTX 3060 that another job was also using (simulation 31 s, mesh 83 s). With the push on the GPU, the mesh step of frames 40 and 100 takes 61 and 71 ms, down from 161 and 210 ms. These are back-to-back runs on the same particles and GPU. The meshes have the same vertex count and a volume within 0.1%. That 130 s has not been measured again, because other jobs kept the GPU and CPU busy and whole-bake times swung two to four times.
 
 ## Output
 
@@ -179,10 +181,8 @@ uv run pytest
 
 ## Known faults
 
-- `--separation` swells a still pool. One pool reached 0.54 m where the pumped volume gives about 0.46 m. It spilled late in the bake.
-- Water on the floor ends in crumbs at its edges, not in sheets.
-- The mesh takes most of the bake time, 83 s of 130 s in the scene above.
-- The Blender add-on has no fields for `--separation`, `--floor-friction`, `--turbulence` or `--flip`.
+- Floor water is joined more than before but not like Mantaflow's. At frame 100 of the comparison scene, the largest component holds 85% of the floor water, up from 39% (Mantaflow: 81%). The mesh has 346 components, down from 3890 (Mantaflow: 81). At frame 60 the share is 77% (Mantaflow 90%). `MIN_NEIGHBOURS = 8` in `surface.py` caused the crumbs. The edge of a sheet one cell deep has 3 to 7 neighbours, so its particles became droplets. Water one particle thick at the far edge of a sheet now falls under the iso level. The water is thinner than Mantaflow's (median 6 cm against 10 cm, same measure), and no thicker than before at the 90th percentile (12.7 cm).
+- The mesh step is still 40 ms of marching cubes over the whole mesh grid. Marching only the active region can cost less.
 
 ## Not done yet
 
