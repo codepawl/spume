@@ -24,7 +24,7 @@ cd spume
 uv run spume --out out/test --cell 0.2 --width 6 --height 20 --frames 40 --mesh-cell 0.25
 ```
 
-This small test takes seconds, plus a one-time kernel compile. The mesh of each frame goes to `out/test`, in the [output format](#output). To bake the full geyser, run this command:
+This small test took 140 s on a first run, on an RTX 3060 that other jobs were also using. The mesh of each frame goes to `out/test`, in the [output format](#output). To bake the full geyser, run this command:
 
 ```bash
 uv run spume --out out/geyser --name geyser
