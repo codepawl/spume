@@ -12,8 +12,8 @@ the local liquid density: spray (little liquid: ballistic), foam (surface: follo
 
 import warp as wp
 
-from flip import GRAVITY, clamp_index, is_wall, resolve_solid, sample_field
-from sparse import cell_of_thread, outside
+from .flip import GRAVITY, clamp_index, is_wall, resolve_solid, sample_field
+from .sparse import cell_of_thread, outside
 
 SPRAY, FOAM, BUBBLE = 0, 1, 2
 

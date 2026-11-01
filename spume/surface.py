@@ -11,7 +11,7 @@ import math
 import numpy as np
 import warp as wp
 
-from flip import sample_field
+from .flip import sample_field
 
 # Share of the way a particle's kernel centre moves to the mean of its neighbours.
 CENTRE_SMOOTHING = 0.9

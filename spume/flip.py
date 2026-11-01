@@ -9,7 +9,7 @@ Particles carry velocity. Each step: particles to grid, gravity, inflow, pressur
 
 import warp as wp
 
-from sparse import cell_of_thread, outside
+from .sparse import cell_of_thread, outside
 
 GRAVITY = 9.81
 

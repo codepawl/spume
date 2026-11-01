@@ -9,7 +9,7 @@ on the GPU, so an iteration never waits for the host. The current pressure is th
 
 import warp as wp
 
-from flip import neighbour_pressure
+from .flip import neighbour_pressure
 
 
 @wp.func
