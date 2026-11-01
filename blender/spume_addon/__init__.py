@@ -2,7 +2,7 @@
 bl_info = {
     "name": "Spume",
     "author": "CodePawl",
-    "version": (0, 2, 0),
+    "version": (0, 3, 0),
     "blender": (4, 2, 0),
     "location": "Properties > Physics > Spume",
     "description": "GPU liquid simulation (FLIP, whitewater, marching cubes) baked by the Spume solver",

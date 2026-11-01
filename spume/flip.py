@@ -9,6 +9,8 @@ Particles carry velocity. Each step: particles to grid, gravity, inflow, pressur
 
 import warp as wp
 
+from .sparse import cell_of_thread, outside
+
 GRAVITY = 9.81
 
 
@@ -93,8 +95,13 @@ def particles_to_grid(
 
 
 @wp.kernel
-def normalise_face(field: wp.array3d(dtype=float), weight: wp.array3d(dtype=float), old: wp.array3d(dtype=float)):
-    i, j, k = wp.tid()
+def normalise_face(blocks: wp.array(dtype=wp.vec3i), field: wp.array3d(dtype=float), weight: wp.array3d(dtype=float), old: wp.array3d(dtype=float)):
+    cell_index = cell_of_thread(blocks, wp.tid())
+    if outside(field, cell_index):
+        return
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     if weight[i, j, k] > 1.0e-6:
         field[i, j, k] = field[i, j, k] / weight[i, j, k]
     else:
@@ -103,20 +110,31 @@ def normalise_face(field: wp.array3d(dtype=float), weight: wp.array3d(dtype=floa
 
 
 @wp.kernel
-def add_gravity(v: wp.array3d(dtype=float), delta_time: float):
-    i, j, k = wp.tid()
+def add_gravity(blocks: wp.array(dtype=wp.vec3i), v: wp.array3d(dtype=float), delta_time: float):
+    cell_index = cell_of_thread(blocks, wp.tid())
+    if outside(v, cell_index):
+        return
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     v[i, j, k] = v[i, j, k] - GRAVITY * delta_time
 
 
 @wp.kernel
 def extend_face(
+    blocks: wp.array(dtype=wp.vec3i),
     source: wp.array3d(dtype=float),
     source_valid: wp.array3d(dtype=float),
     target: wp.array3d(dtype=float),
     target_valid: wp.array3d(dtype=float),
 ):
     """One layer of velocity extrapolation into faces no particle touched."""
-    i, j, k = wp.tid()
+    cell_index = cell_of_thread(blocks, wp.tid())
+    if outside(target, cell_index):
+        return
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     if source_valid[i, j, k] > 0.0:
         target[i, j, k] = source[i, j, k]
         target_valid[i, j, k] = 1.0
@@ -196,10 +214,9 @@ def resolve_solid(solid: wp.array3d(dtype=int), old_position: wp.vec3, new_posit
     return moved
 
 
-@wp.kernel
-def enforce_solids(field: wp.array3d(dtype=float), axis: int, solid: wp.array3d(dtype=int)):
-    """Zero the velocity of every face that touches a solid cell."""
-    i, j, k = wp.tid()
+@wp.func
+def touches_solid(solid: wp.array3d(dtype=int), axis: int, i: int, j: int, k: int) -> bool:
+    """True when the face (i, j, k) of velocity component `axis` borders a solid cell."""
     low = int(0)
     high = int(0)
     if axis == 0:
@@ -217,14 +234,90 @@ def enforce_solids(field: wp.array3d(dtype=float), axis: int, solid: wp.array3d(
             low = solid[i, j, k - 1]
         if k < solid.shape[2]:
             high = solid[i, j, k]
-    if low == 1 or high == 1:
-        field[i, j, k] = 0.0
+    return low == 1 or high == 1
 
 
 @wp.kernel
-def enforce_walls(field: wp.array3d(dtype=float), axis: int, walls: int):
+def enforce_solids(blocks: wp.array(dtype=wp.vec3i), field: wp.array3d(dtype=float), axis: int, solid: wp.array3d(dtype=int)):
+    """Zero the velocity of every face that touches a solid cell."""
+    cell_index = cell_of_thread(blocks, wp.tid())
+    if outside(field, cell_index):
+        return
+    if touches_solid(solid, axis, cell_index[0], cell_index[1], cell_index[2]):
+        field[cell_index[0], cell_index[1], cell_index[2]] = 0.0
+
+
+@wp.kernel
+def diffuse_face(
+    blocks: wp.array(dtype=wp.vec3i),
+    previous: wp.array3d(dtype=float),
+    source: wp.array3d(dtype=float),
+    weight: wp.array3d(dtype=float),
+    solid: wp.array3d(dtype=int),
+    axis: int,
+    blend: float,
+    walls: int,
+    target: wp.array3d(dtype=float),
+):
+    """One Jacobi sweep of implicit viscosity, (1 + blend * n) v = source + blend * (sum of neighbours). Solids and solid walls are no-slip (a neighbour of 0);
+    a neighbour without liquid does not count, which is a free surface with no shear."""
+    cell_index = cell_of_thread(blocks, wp.tid())
+    if outside(target, cell_index):
+        return
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
+    if weight[i, j, k] <= 1.0e-6:
+        target[i, j, k] = previous[i, j, k]
+        return
+    total = float(0.0)
+    neighbours = float(0.0)
+    for side in range(6):
+        ni = i
+        nj = j
+        nk = k
+        if side == 0:
+            ni = i - 1
+        elif side == 1:
+            ni = i + 1
+        elif side == 2:
+            nj = j - 1
+        elif side == 3:
+            nj = j + 1
+        elif side == 4:
+            nk = k - 1
+        else:
+            nk = k + 1
+        if ni < 0 or nj < 0 or nk < 0 or ni >= target.shape[0] or nj >= target.shape[1] or nk >= target.shape[2]:
+            if is_wall(walls, side):
+                neighbours = neighbours + 1.0
+        elif touches_solid(solid, axis, ni, nj, nk):
+            neighbours = neighbours + 1.0
+        elif weight[ni, nj, nk] > 1.0e-6:
+            total = total + previous[ni, nj, nk]
+            neighbours = neighbours + 1.0
+    target[i, j, k] = (source[i, j, k] + blend * total) / (1.0 + blend * neighbours)
+
+
+@wp.kernel
+def damp_floor_layer(blocks: wp.array(dtype=wp.vec3i), field: wp.array3d(dtype=float), keep: float):
+    """Friction: slows the horizontal velocity in the cell row on the floor."""
+    cell_index = cell_of_thread(blocks, wp.tid())
+    if outside(field, cell_index):
+        return
+    if cell_index[1] == 0:
+        field[cell_index[0], 0, cell_index[2]] = field[cell_index[0], 0, cell_index[2]] * keep
+
+
+@wp.kernel
+def enforce_walls(blocks: wp.array(dtype=wp.vec3i), field: wp.array3d(dtype=float), axis: int, walls: int):
     """Zero the velocity component that points through a solid wall."""
-    i, j, k = wp.tid()
+    cell_index = cell_of_thread(blocks, wp.tid())
+    if outside(field, cell_index):
+        return
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     index = i
     if axis == 1:
         index = j
@@ -238,8 +331,32 @@ def enforce_walls(field: wp.array3d(dtype=float), axis: int, walls: int):
         field[i, j, k] = 0.0
 
 
+MAX_CROWDING = 2.0
+# Random spacing puts more than the rest count in many cells of still water, and pushing those apart would swell a pool over its rim.
+CROWDING_START = 1.5
+
+
+@wp.func
+def inflow_wave(sideways: float, upwards: float, phase: float, offset: float) -> float:
+    """A slow wave across the opening, about -1 to 1. Sideways and upwards run -1 to 1 over the opening. White noise per particle or per face would average out on the grid and leave a perfect rod."""
+    first = 0.5 * wp.sin(2.4 * sideways + 1.7 * upwards + phase + offset)
+    second = 0.3 * wp.sin(-1.9 * sideways + 3.1 * upwards + 1.618 * phase + 2.1 * offset)
+    third = 0.2 * wp.sin(3.7 * sideways - 1.3 * upwards + 2.414 * phase + 3.7 * offset)
+    return first + second + third
+
+
+@wp.func
+def inflow_velocity(direction: wp.vec3, across: wp.vec3, up_across: wp.vec3, sideways: float, upwards: float, speed: float, cone: float, turbulence: float, phase: float) -> wp.vec3:
+    """Jet velocity at a point of the opening: the speed varies across it and over time, and the water leans sideways the same slow way."""
+    along = speed * (1.0 + 2.0 * turbulence * inflow_wave(sideways, upwards, phase, 0.0))
+    lean_across = cone * sideways + turbulence * inflow_wave(sideways, upwards, phase, 1.3)
+    lean_up = cone * upwards + turbulence * inflow_wave(sideways, upwards, phase, 2.9)
+    return direction * along + across * (speed * lean_across) + up_across * (speed * lean_up)
+
+
 @wp.kernel
 def set_opening_velocity(
+    blocks: wp.array(dtype=wp.vec3i),
     field: wp.array3d(dtype=float),
     axis: int,
     cell: float,
@@ -254,11 +371,15 @@ def set_opening_velocity(
     speed: float,
     cone: float,
     turbulence: float,
-    step_seed: int,
-    seed: int,
+    phase: float,
 ):
     """Impose the inflow on the faces of one velocity component that lie inside the opening: a disc or a rectangle in the plane across `direction`, a few cells deep."""
-    i, j, k = wp.tid()
+    cell_index = cell_of_thread(blocks, wp.tid())
+    if outside(field, cell_index):
+        return
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     position = wp.vec3((float(i) + face_offset[0]) * cell, (float(j) + face_offset[1]) * cell, (float(k) + face_offset[2]) * cell)
     relative = position - centre
     along = wp.dot(relative, direction)
@@ -273,14 +394,13 @@ def set_opening_velocity(
         inside = wp.abs(sideways) < half_across and wp.abs(upwards) < half_up
     if not inside:
         return
-    state = wp.rand_init(seed + i * 7919 + k * 104729 + j * 31, step_seed)
-    noise = 1.0 + turbulence * (wp.randf(state) - 0.5) * 2.0
-    spread = cone * speed * 0.5 * (sideways / half_across * across[axis] + upwards / half_up * up_across[axis])
-    field[i, j, k] = speed * noise * direction[axis] + spread
+    velocity = inflow_velocity(direction, across, up_across, sideways / half_across, upwards / half_up, speed, cone, turbulence, phase)
+    field[i, j, k] = velocity[axis]
 
 
 @wp.kernel
 def compute_divergence(
+    blocks: wp.array(dtype=wp.vec3i),
     u: wp.array3d(dtype=float),
     v: wp.array3d(dtype=float),
     w: wp.array3d(dtype=float),
@@ -289,13 +409,22 @@ def compute_divergence(
     inverse_cell: float,
     divergence: wp.array3d(dtype=float),
     pressure: wp.array3d(dtype=float),
+    rest_count: float,
+    expansion_rate: float,
 ):
-    i, j, k = wp.tid()
+    cell_index = cell_of_thread(blocks, wp.tid())
+    if outside(divergence, cell_index):
+        return
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     if cell_count[i, j, k] == 0 or solid[i, j, k] == 1:
         divergence[i, j, k] = 0.0
         pressure[i, j, k] = 0.0
         return
-    divergence[i, j, k] = (u[i + 1, j, k] - u[i, j, k] + v[i, j + 1, k] - v[i, j, k] + w[i, j, k + 1] - w[i, j, k]) * inverse_cell
+    # Particles packed tighter than at rest ask the pressure solve to push them apart. Without this an impact squeezes them together and its energy never comes back as splash.
+    crowding = wp.clamp(float(cell_count[i, j, k]) / rest_count - CROWDING_START, 0.0, MAX_CROWDING)
+    divergence[i, j, k] = (u[i + 1, j, k] - u[i, j, k] + v[i, j + 1, k] - v[i, j, k] + w[i, j, k + 1] - w[i, j, k]) * inverse_cell - crowding * expansion_rate
 
 
 @wp.func
@@ -322,6 +451,7 @@ def neighbour_pressure(pressure: wp.array3d(dtype=float), cell_count: wp.array3d
 
 @wp.kernel
 def relax_pressure(
+    cells: wp.array(dtype=wp.vec3i),
     pressure: wp.array3d(dtype=float),
     divergence: wp.array3d(dtype=float),
     cell_count: wp.array3d(dtype=int),
@@ -332,10 +462,11 @@ def relax_pressure(
     walls: int,
 ):
     """One red-black successive over-relaxation sweep (in place, safe because a colour only reads the other colour)."""
-    i, j, k = wp.tid()
+    cell_index = cells[wp.tid()]
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     if (i + j + k) % 2 != parity:
-        return
-    if cell_count[i, j, k] == 0 or solid[i, j, k] == 1:
         return
     total = float(0.0)
     neighbours = float(0.0)
@@ -374,8 +505,13 @@ def cell_pressure(pressure: wp.array3d(dtype=float), cell_count: wp.array3d(dtyp
 
 
 @wp.kernel
-def apply_pressure_u(u: wp.array3d(dtype=float), pressure: wp.array3d(dtype=float), cell_count: wp.array3d(dtype=int), solid: wp.array3d(dtype=int), inverse_cell: float, walls: int):
-    i, j, k = wp.tid()
+def apply_pressure_u(blocks: wp.array(dtype=wp.vec3i), u: wp.array3d(dtype=float), pressure: wp.array3d(dtype=float), cell_count: wp.array3d(dtype=int), solid: wp.array3d(dtype=int), inverse_cell: float, walls: int):
+    cell_index = cell_of_thread(blocks, wp.tid())
+    if outside(u, cell_index):
+        return
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     if (i == 0 and is_wall(walls, 0)) or (i == pressure.shape[0] and is_wall(walls, 1)):
         return
     if (i > 0 and solid[i - 1, j, k] == 1) or (i < pressure.shape[0] and solid[wp.min(i, pressure.shape[0] - 1), j, k] == 1):
@@ -387,8 +523,13 @@ def apply_pressure_u(u: wp.array3d(dtype=float), pressure: wp.array3d(dtype=floa
 
 
 @wp.kernel
-def apply_pressure_v(v: wp.array3d(dtype=float), pressure: wp.array3d(dtype=float), cell_count: wp.array3d(dtype=int), solid: wp.array3d(dtype=int), inverse_cell: float, walls: int):
-    i, j, k = wp.tid()
+def apply_pressure_v(blocks: wp.array(dtype=wp.vec3i), v: wp.array3d(dtype=float), pressure: wp.array3d(dtype=float), cell_count: wp.array3d(dtype=int), solid: wp.array3d(dtype=int), inverse_cell: float, walls: int):
+    cell_index = cell_of_thread(blocks, wp.tid())
+    if outside(v, cell_index):
+        return
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     if (j == 0 and is_wall(walls, 2)) or (j == pressure.shape[1] and is_wall(walls, 3)):
         return
     if (j > 0 and solid[i, j - 1, k] == 1) or (j < pressure.shape[1] and solid[i, wp.min(j, pressure.shape[1] - 1), k] == 1):
@@ -400,8 +541,13 @@ def apply_pressure_v(v: wp.array3d(dtype=float), pressure: wp.array3d(dtype=floa
 
 
 @wp.kernel
-def apply_pressure_w(w: wp.array3d(dtype=float), pressure: wp.array3d(dtype=float), cell_count: wp.array3d(dtype=int), solid: wp.array3d(dtype=int), inverse_cell: float, walls: int):
-    i, j, k = wp.tid()
+def apply_pressure_w(blocks: wp.array(dtype=wp.vec3i), w: wp.array3d(dtype=float), pressure: wp.array3d(dtype=float), cell_count: wp.array3d(dtype=int), solid: wp.array3d(dtype=int), inverse_cell: float, walls: int):
+    cell_index = cell_of_thread(blocks, wp.tid())
+    if outside(w, cell_index):
+        return
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     if (k == 0 and is_wall(walls, 4)) or (k == pressure.shape[2] and is_wall(walls, 5)):
         return
     if (k > 0 and solid[i, j, k - 1] == 1) or (k < pressure.shape[2] and solid[i, j, wp.min(k, pressure.shape[2] - 1)] == 1):
@@ -414,6 +560,7 @@ def apply_pressure_w(w: wp.array3d(dtype=float), pressure: wp.array3d(dtype=floa
 
 @wp.kernel
 def residual_divergence(
+    cells: wp.array(dtype=wp.vec3i),
     u: wp.array3d(dtype=float),
     v: wp.array3d(dtype=float),
     w: wp.array3d(dtype=float),
@@ -421,9 +568,10 @@ def residual_divergence(
     inverse_cell: float,
     worst: wp.array(dtype=float),
 ):
-    i, j, k = wp.tid()
-    if cell_count[i, j, k] == 0:
-        return
+    cell_index = cells[wp.tid()]
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     value = (u[i + 1, j, k] - u[i, j, k] + v[i, j + 1, k] - v[i, j, k] + w[i, j, k + 1] - w[i, j, k]) * inverse_cell
     wp.atomic_max(worst, 0, wp.abs(value))
 
@@ -483,8 +631,13 @@ def grid_to_particles(
 
 
 @wp.kernel
-def mark_valid(weight: wp.array3d(dtype=float), valid: wp.array3d(dtype=float)):
-    i, j, k = wp.tid()
+def mark_valid(blocks: wp.array(dtype=wp.vec3i), weight: wp.array3d(dtype=float), valid: wp.array3d(dtype=float)):
+    cell_index = cell_of_thread(blocks, wp.tid())
+    if outside(valid, cell_index):
+        return
+    i = cell_index[0]
+    j = cell_index[1]
+    k = cell_index[2]
     if weight[i, j, k] > 1.0e-6:
         valid[i, j, k] = 1.0
     else:
@@ -508,6 +661,7 @@ def spawn_inflow(
     delta_time: float,
     cone: float,
     turbulence: float,
+    phase: float,
     step_seed: int,
     seed: int,
 ):
@@ -525,12 +679,8 @@ def spawn_inflow(
         sideways = (wp.randf(state) * 2.0 - 1.0) * half_across
         upwards = (wp.randf(state) * 2.0 - 1.0) * half_up
     depth = wp.randf(state) * speed * delta_time + 0.004
-    noise = 1.0 + turbulence * (wp.randf(state) - 0.5) * 2.0
-    lateral = turbulence * speed * 0.25
-    spread = across * (cone * speed * sideways / half_across) + up_across * (cone * speed * upwards / half_up)
-    jitter = across * (lateral * (wp.randf(state) - 0.5)) + up_across * (lateral * (wp.randf(state) - 0.5))
     positions[first + tid] = centre + across * sideways + up_across * upwards + direction * depth
-    velocities[first + tid] = direction * (speed * noise) + spread + jitter
+    velocities[first + tid] = inflow_velocity(direction, across, up_across, sideways / half_across, upwards / half_up, speed, cone, turbulence, phase)
     alive[first + tid] = 1
 
 

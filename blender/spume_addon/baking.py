@@ -82,8 +82,6 @@ def core_arguments(context, domain, preview, folder):
         arguments += ["--ww-trapped-rate", f"{60.0 * amount:.3f}", "--ww-crest-rate", f"{120.0 * amount:.3f}", "--ww-export", str(max(2, int(22000 * amount)))]
     else:
         arguments += ["--no-whitewater"]
-    if preview:
-        arguments += ["--iterations", "40"]
 
     size = tuple(int(round(extent / cell)) for extent in (length, height, width))
     obstacles = [obj for obj in objects_with_role(scene, "OBSTACLE") if obj.type == "MESH"]

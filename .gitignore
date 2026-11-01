@@ -4,3 +4,5 @@ out/
 *.log
 *.err
 *.zip
+dist/
+.pytest_cache/

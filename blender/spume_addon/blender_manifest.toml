@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "spume"
-version = "0.2.0"
+version = "0.3.0"
 name = "Spume"
 tagline = "GPU liquid simulation with whitewater, baked by the Spume solver"
 maintainer = "CodePawl <legal@codepawl.com>"

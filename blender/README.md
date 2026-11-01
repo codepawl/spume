@@ -13,16 +13,16 @@ Made by `test_addon.py`: a 17 m/s jet and a lateral torrent, with a 1.8 m cube h
 
 ## Install
 
-Needs an NVIDIA GPU, [uv](https://docs.astral.sh/uv/) (or your own Python with `warp-lang`, `numpy`, `psutil`) and Blender 4.2 or newer.
+Needs an NVIDIA GPU, [uv](https://docs.astral.sh/uv/) (or your own Python with `warp-lang`, `numpy`, `psutil`, `pillow`) and Blender 4.2 or newer.
 From a checkout, build and install the extension with Blender's own command line:
 
 ```
 blender --command extension build --source-dir blender/spume_addon --output-dir out
-blender --command extension install-file --repo user_default --enable out/spume-0.2.0.zip
+blender --command extension install-file --repo user_default --enable out/spume-0.3.0.zip
 ```
 
 Or use Edit > Preferences > Add-ons > Install from Disk with that zip. In the add-on preferences set **Solver Folder** to the Spume checkout
-(filled in automatically when the add-on runs from the checkout). A bake runs `uv run --project <checkout> python run.py ...` in a separate process,
+(filled in automatically when the add-on runs from the checkout). A bake runs `uv run --project <checkout> spume ...` in a separate process,
 at below-normal priority; set **Python** instead to use your own interpreter. Blender's own Python is never touched and Blender stays responsive.
 
 ## The panel
@@ -55,7 +55,7 @@ drawn as small spheres by the *Spume Whitewater Spheres* Geometry Nodes group an
 domain's transform at bake time. Caches from solver 0.1 have no kinds; the add-on then guesses them from speed.
 
 The cache folder holds the solver's [output format](../README.md#output). The addon also leaves `inflows.json` and `obstacle.npy` there: the
-exact input of the bake, which you can feed to `run.py` by hand.
+exact input of the bake, which you can feed to `spume` by hand.
 
 ## Test
 
