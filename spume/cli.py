@@ -238,18 +238,6 @@ def load_obstacles(options, size, cell):
     return mask if mask.any() else None
 
 
-def push_out_of_solid(vertices, normals, mask, cell):
-    """Surface vertices that the particle splats left inside an obstacle move back along the opposite surface normal, towards the liquid."""
-    upper = np.array(mask.shape) - 1
-    for _ in range(16):
-        index = np.clip(np.floor(vertices / cell).astype(int), 0, upper)
-        inside = mask[index[:, 0], index[:, 1], index[:, 2]]
-        if not inside.any():
-            break
-        vertices[inside] -= normals[inside] * (0.5 * cell)
-    return vertices
-
-
 class Simulation:
     def __init__(self, options):
         self.options = options
@@ -584,10 +572,9 @@ def main():
         if frame < skipped_frames:
             continue
         started = time.perf_counter()
-        vertices, normals, indices = simulation.surface.extract(simulation.positions[: simulation.particle_count], simulation.alive[: simulation.particle_count], simulation.iso_threshold)
+        obstacle_cells = simulation.solid if simulation.solid_host is not None else None
+        vertices, normals, indices = simulation.surface.extract(simulation.positions[: simulation.particle_count], simulation.alive[: simulation.particle_count], simulation.iso_threshold, obstacle_cells)
         wp.synchronize_device(options.device)
-        if simulation.solid_host is not None and len(vertices):
-            vertices = push_out_of_solid(vertices, normals, simulation.solid_host, options.cell)
         simulation.timers["mesh"] += time.perf_counter() - started
         started = time.perf_counter()
         spray_positions, spray_velocities, spray_ids, spray_kinds, ww_alive = simulation.export_whitewater()

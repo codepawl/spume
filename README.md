@@ -140,7 +140,9 @@ On a thin faucet stream, keep `--turbulence` low, about 0.06. A high value twist
 - A step extrapolates velocity once, for whitewater. Liquid particles only read faces they splatted to.
 - The step size comes from the fastest inflow or a free fall from the top of the domain. A small scene takes no extra steps.
 
-The scene at the top of this page uses a 0.025 m mesh and no whitewater. It took 130 s on an RTX 3060 that another job was also using (simulation 31 s, mesh 83 s).
+- The mesher pushes vertices out of obstacles on the GPU (`push_out_of_solid` in `surface.py`). A host loop did this before, and it was the slowest step of a mesh: 105 to 130 ms a frame at 330k to 470k particles, against 40 ms for marching cubes, 5 to 13 ms for the kernel fit and 8 ms for the blur.
+
+The scene at the top of this page uses a 0.025 m mesh and no whitewater. It took 130 s on an RTX 3060 that another job was also using (simulation 31 s, mesh 83 s). With the obstacle push on the GPU, the mesh step of frames 40 and 100 of that scene takes 61 and 71 ms instead of 161 and 210 ms (same particles, same GPU, measured back to back), and the meshes have the same vertex count and a volume within 0.1%. A whole bake could not be timed again on a quiet machine: the GPU and every CPU core were busy with other jobs, and the whole-bake numbers swung two to four times from run to run.
 
 ## Output
 
