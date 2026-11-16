@@ -1,4 +1,13 @@
-# Spume
+<p align="center">
+  <a href="https://codepawl.com">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/codepawl/.github/main/brand/codepawl-lockup-dark.png">
+      <img alt="CodePawl" src="https://raw.githubusercontent.com/codepawl/.github/main/brand/codepawl-lockup.png" width="200">
+    </picture>
+  </a>
+</p>
+
+<h1 align="center">Spume</h1>
 
 A liquid solver for one consumer GPU. It bakes jets, geysers and torrents into a mesh sequence that you can load in Blender or three.js.
 
@@ -191,3 +200,18 @@ Surface tension, a multigrid preconditioner, moving obstacles.
 ## Licence
 
 Apache-2.0, see [LICENSE](LICENSE). Copyright 2026 CodePawl. The code is original. It follows the published methods named above and uses Warp's public API.
+
+<br>
+
+<p align="center">
+  <sub>Made by CodePawl, an independent 3D studio in Vietnam.</sub>
+  <br>
+  <sub>
+    <a href="https://codepawl.com">Website</a> ·
+    <a href="https://x.com/codepawl">X</a> ·
+    <a href="https://github.com/codepawl">GitHub</a> ·
+    <a href="https://huggingface.co/codepawl">Hugging Face</a> ·
+    <a href="https://www.youtube.com/@codepawlhq">YouTube</a> ·
+    <a href="https://www.threads.com/@codepawl">Threads</a>
+  </sub>
+</p>
